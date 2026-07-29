@@ -41,6 +41,8 @@ VPN_ALLOWED_NETWORKS=(
 # Regex for detecting the VPN gateway in the routing table.
 VPN_GATEWAY_REGEX='^10\.50\.[0-9]+\.[0-9]+$'
 
+# Corporate domains resolved through the VPN DNS server.
+# Resolver files for these domains are removed at startup to recover from an interrupted previous session.
 CORPORATE_DNS_DOMAINS=(
   "corp.example.com"
   "internal.example.net"

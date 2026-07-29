@@ -76,6 +76,10 @@ For example:
 
 This allows corporate domains to use the VPN DNS server while all other DNS queries continue using the DNS configuration of the current network.
 
+At startup, the script removes resolver files for the configured corporate domains. This allows it to recover from an interrupted previous session that left stale split-DNS configuration behind.
+
+This is especially important when the VPN endpoint itself belongs to one of the configured corporate domains: a stale resolver could otherwise direct the VPN hostname lookup to a DNS server that is only reachable after the VPN is connected.
+
 ### Automatic cleanup
 
 On exit, including `Ctrl+C`, normal termination and most handled failures, the script:
@@ -88,6 +92,8 @@ On exit, including `Ctrl+C`, normal termination and most handled failures, the s
 - removes temporary files.
 
 Cleanup operations are intentionally tolerant of partial failures.
+
+If cleanup could not run, for example after `SIGKILL`, a crash or power loss, the next launch removes stale resolver files before attempting to resolve the VPN endpoint.
 
 ### Runtime validation
 
@@ -171,6 +177,8 @@ Run it:
 ```bash
 ./connect.sh
 ```
+
+Before opening the authentication flow, the script removes stale resolver files and verifies that the VPN hostname can be resolved.
 
 A dedicated Chrome window will open for authentication.
 
@@ -392,7 +400,7 @@ Cleanup requires elevated privileges to remove routes and resolver files. A smal
 - assumes that the tunnel interface network appears in the routing table as the VPN gateway's /24 network;
 - route setup uses a configurable delay because `vpnc-script` may still be adding routes after the tunnel appears;
 - `SIGKILL`, system crashes and power loss prevent shell cleanup from running;
-- existing `/etc/resolver` files for configured domains are overwritten and removed;
+- existing `/etc/resolver` files for configured domains are removed at startup, overwritten during connection and removed again during cleanup;
 - different VPN environments may require changes to gateway detection or the SSO URL.
 
 ## Engineering highlights

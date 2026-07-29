@@ -32,6 +32,9 @@ VPN_GATEWAY=""
 CLEANUP_DONE=0
 DNS_CONFIGURED=0
 
+TMP_DIR="${TMPDIR:-/tmp}"
+TMP_DIR="${TMP_DIR%/}"
+
 VPN_ADDED_NETWORKS=()
 
 need() {
@@ -140,6 +143,7 @@ need node
 need npm
 need openconnect
 need lsof
+need cat
 need tail
 need netstat
 need awk
@@ -154,6 +158,8 @@ need killall
 need mktemp
 need sleep
 need grep
+need pgrep
+need ps
 
 require_value "CHROME_BIN" "${CHROME_BIN:-}"
 require_value "CHROME_PROFILE_DIR" "${CHROME_PROFILE_DIR:-}"
@@ -207,7 +213,7 @@ node -e "require('playwright');" >/dev/null 2>&1 || {
 }
 
 mkdir -p "$CHROME_PROFILE_DIR"
-LOG_FILE="$(mktemp /tmp/openconnect_split_tunnel.XXXXXX.log)"
+LOG_FILE="$(mktemp "$TMP_DIR/openconnect_split_tunnel.XXXXXX")"
 
 cleanup() {
   local exit_code=$?
@@ -288,6 +294,55 @@ trap 'exit 143' SIGTERM
 
 sudo -v
 
+EXISTING_OPENCONNECT_PID=""
+while IFS= read -r candidate_pid; do
+  [[ -n "$candidate_pid" ]] || continue
+
+  process_command="$(
+    ps -o command= -p "$candidate_pid" 2>/dev/null || true
+  )"
+
+  if [[ "$process_command" == *"$VPN_HOST"* ]]; then
+    EXISTING_OPENCONNECT_PID="$candidate_pid"
+    break
+  fi
+done < <(pgrep -x openconnect 2>/dev/null || true)
+
+if [[ -n "$EXISTING_OPENCONNECT_PID" ]]; then
+  echo "OpenConnect is already running for $VPN_HOST"
+  echo "Process ID: $EXISTING_OPENCONNECT_PID"
+  exit 1
+fi
+
+STALE_DNS_REMOVED=0
+for domain in "${CORPORATE_DNS_DOMAINS[@]}"; do
+  resolver_file="/etc/resolver/$domain"
+
+  if [[ -e "$resolver_file" ]]; then
+    echo "Removing stale resolver: $resolver_file"
+    sudo rm -f "$resolver_file"
+    STALE_DNS_REMOVED=1
+  fi
+done
+
+if (( STALE_DNS_REMOVED )); then
+  sudo dscacheutil -flushcache
+  sudo killall -HUP mDNSResponder 2>/dev/null || true
+fi
+
+VPN_HOST_ADDRESS="$(
+  dscacheutil -q host -a name "$VPN_HOST" 2>/dev/null |
+    awk '/ip_address:/ { print $2; exit }' ||
+    true
+)"
+
+if [[ -z "$VPN_HOST_ADDRESS" ]]; then
+  echo "Cannot resolve VPN host: $VPN_HOST"
+  exit 1
+fi
+
+echo "VPN host resolved: $VPN_HOST -> $VPN_HOST_ADDRESS"
+
 if lsof -iTCP:"$CDP_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port $CDP_PORT is busy"
   exit 1
@@ -327,7 +382,7 @@ fi
 echo
 echo "Waiting for SSO in browser..."
 
-JS_FILE="$(mktemp /tmp/openconnect_cdp.XXXXXX.cjs)"
+JS_FILE="$(mktemp "$TMP_DIR/openconnect_cdp.XXXXXX")"
 
 cat > "$JS_FILE" <<'JS'
 const { chromium } = require("playwright");
@@ -409,7 +464,7 @@ if [[ -z "$VPNC_SCRIPT" ]]; then
   exit 1
 fi
 
-VPNC_WRAPPER_FILE="$(mktemp /tmp/openconnect_vpnc_wrapper.XXXXXX.sh)"
+VPNC_WRAPPER_FILE="$(mktemp "$TMP_DIR/openconnect_vpnc_wrapper.XXXXXX")"
 
 cat > "$VPNC_WRAPPER_FILE" <<EOF_WRAPPER
 #!/bin/sh
@@ -478,8 +533,17 @@ done
 
 if [[ -z "$VPN_GATEWAY" ]]; then
   echo "VPN gateway not found"
+  echo
+  echo "OpenConnect log:"
+  cat "$LOG_FILE" 2>/dev/null || true
+  echo
+  echo "Routing table:"
+  netstat -rn -f inet
   exit 1
 fi
+
+echo
+echo "Waiting for VPN routes..."
 
 sleep "${VPN_ROUTE_SETUP_DELAY_SECONDS:-3}"
 
