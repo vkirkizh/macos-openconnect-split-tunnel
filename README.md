@@ -403,21 +403,6 @@ Cleanup requires elevated privileges to remove routes and resolver files. A smal
 - existing `/etc/resolver` files for configured domains are removed at startup, overwritten during connection and removed again during cleanup;
 - different VPN environments may require changes to gateway detection or the SSO URL.
 
-## Engineering highlights
-
-Although this is a Bash utility, it contains several concepts that are also important in backend development:
-- configuration separation;
-- explicit state management;
-- defensive cleanup;
-- signal handling;
-- process lifecycle management;
-- failure-safe operations;
-- runtime invariants and validation;
-- minimal network exposure through explicit route allowlisting;
-- integration with external tools and operating-system APIs.
-
-The script was developed iteratively against a real VPN environment, with routing and DNS behavior verified using macOS networking tools.
-
 ## Disclaimer
 
 This project is not affiliated with Cisco or the OpenConnect project.
