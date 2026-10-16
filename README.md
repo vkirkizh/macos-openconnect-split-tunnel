@@ -80,9 +80,18 @@ At startup, the script removes resolver files for the configured corporate domai
 
 This is especially important when the VPN endpoint itself belongs to one of the configured corporate domains: a stale resolver could otherwise direct the VPN hostname lookup to a DNS server that is only reachable after the VPN is connected.
 
+### VPN keepalive
+
+After route validation, the script starts a background ping to `VPN_CORPORATE_DNS`. The first packet is sent immediately, followed by one packet every 60 seconds.
+
+This generates regular traffic through the VPN and may prevent disconnects caused by inactivity. Ping output is suppressed, and the process is stopped during cleanup.
+
+The interval is currently fixed in `connect.sh`. Keepalive does not override a server-enforced maximum session lifetime and does not send traffic while the Mac is asleep.
+
 ### Automatic cleanup
 
 On exit, including `Ctrl+C`, normal termination and most handled failures, the script:
+- stops the VPN keepalive ping;
 - stops the log follower;
 - removes routes added by the script;
 - stops OpenConnect;
@@ -91,9 +100,13 @@ On exit, including `Ctrl+C`, normal termination and most handled failures, the s
 - stops the `sudo` keepalive process;
 - removes temporary files.
 
+The script first requests a graceful shutdown with `SIGTERM`. If OpenConnect is still running after 10 seconds, it sends `SIGKILL` to the OpenConnect PID recorded at startup. It then waits up to 3 additional seconds for the `sudo` job to exit.
+
+Forced termination skips OpenConnect's own disconnect hook, but the script continues its remaining cleanup steps. Signal failures are reported if the target process still exists. If OpenConnect remains running, the script reports an error; if only the sudo launcher remains, it reports a warning.
+
 Cleanup operations are intentionally tolerant of partial failures.
 
-If cleanup could not run, for example after `SIGKILL`, a crash or power loss, the next launch removes stale resolver files before attempting to resolve the VPN endpoint.
+If the script's cleanup could not run, for example after the script itself receives `SIGKILL`, a crash or power loss, the next launch removes stale resolver files before attempting to resolve the VPN endpoint.
 
 ### Runtime validation
 
@@ -399,7 +412,7 @@ Cleanup requires elevated privileges to remove routes and resolver files. A smal
 - supports multiple allowed networks through configuration, but only one standalone allowed host;
 - assumes that the tunnel interface network appears in the routing table as the VPN gateway's /24 network;
 - route setup uses a configurable delay because `vpnc-script` may still be adding routes after the tunnel appears;
-- `SIGKILL`, system crashes and power loss prevent shell cleanup from running;
+- sending `SIGKILL` to the wrapper script, system crashes and power loss prevent shell cleanup from running;
 - existing `/etc/resolver` files for configured domains are removed at startup, overwritten during connection and removed again during cleanup;
 - different VPN environments may require changes to gateway detection or the SSO URL.
 

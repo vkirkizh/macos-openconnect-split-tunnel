@@ -22,8 +22,10 @@ source "$CONFIG_FILE"
 NODE_MODULES_ROOT=""
 CHROME_PID=""
 OPENCONNECT_PID=""
+OPENCONNECT_PID_FILE=""
 TAIL_PID=""
 SUDO_KEEPALIVE_PID=""
+VPN_KEEPALIVE_PID=""
 JS_FILE=""
 LOG_FILE=""
 VPNC_WRAPPER_FILE=""
@@ -160,6 +162,7 @@ need sleep
 need grep
 need pgrep
 need ps
+need ping
 
 require_value "CHROME_BIN" "${CHROME_BIN:-}"
 require_value "CHROME_PROFILE_DIR" "${CHROME_PROFILE_DIR:-}"
@@ -215,6 +218,38 @@ node -e "require('playwright');" >/dev/null 2>&1 || {
 mkdir -p "$CHROME_PROFILE_DIR"
 LOG_FILE="$(mktemp "$TMP_DIR/openconnect_split_tunnel.XXXXXX")"
 
+process_is_running() {
+  local pid="${1:-}"
+  local state=""
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  state="$(ps -p "$pid" -o stat= 2>/dev/null)" || return 1
+  [[ -n "$state" && "$state" != *Z* ]]
+}
+
+signal_if_running() {
+  local signal_name="$1"
+  local pid="$2"
+  local signal_error=""
+  process_is_running "$pid" || return 0
+  if signal_error="$(sudo -n /bin/kill "-$signal_name" "$pid" 2>&1)"; then
+    return 0
+  fi
+  process_is_running "$pid" || return 0
+  printf '%s\n' "$signal_error" >&2
+  return 1
+}
+
+wait_for_process_exit() {
+  local pid="$1"
+  local timeout="$2"
+  local attempt
+  for (( attempt=0; attempt<timeout; attempt++ )); do
+    process_is_running "$pid" || return 0
+    sleep 1
+  done
+  ! process_is_running "$pid"
+}
+
 cleanup() {
   local exit_code=$?
   local i
@@ -227,6 +262,12 @@ cleanup() {
 
   echo
   echo "Finishing processes..."
+
+  if [[ -n "${VPN_KEEPALIVE_PID:-}" ]]; then
+    kill "$VPN_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$VPN_KEEPALIVE_PID" 2>/dev/null || true
+    VPN_KEEPALIVE_PID=""
+  fi
 
   if [[ -n "${TAIL_PID:-}" ]]; then
     kill "$TAIL_PID" 2>/dev/null || true
@@ -246,8 +287,34 @@ cleanup() {
   VPN_ADDED_NETWORKS=()
 
   if [[ -n "${OPENCONNECT_PID:-}" ]]; then
-    kill -SIGINT "$OPENCONNECT_PID" 2>/dev/null || true
-    wait "$OPENCONNECT_PID" 2>/dev/null || true
+    local vpn_process_pid=""
+
+    if [[ -s "$OPENCONNECT_PID_FILE" ]]; then
+      IFS= read -r vpn_process_pid < "$OPENCONNECT_PID_FILE" || true
+    fi
+
+    if [[ "$vpn_process_pid" =~ ^[1-9][0-9]*$ ]]; then
+      signal_if_running TERM "$vpn_process_pid" || true
+
+      if ! wait_for_process_exit "$vpn_process_pid" 10; then
+        echo "Force-stopping OpenConnect (PID: $vpn_process_pid)"
+        signal_if_running KILL "$vpn_process_pid" || true
+      fi
+    else
+      echo "Error: cannot determine OpenConnect PID" >&2
+      signal_if_running TERM "$OPENCONNECT_PID" || true
+    fi
+
+    if wait_for_process_exit "$OPENCONNECT_PID" 3; then
+      wait "$OPENCONNECT_PID" 2>/dev/null || true
+    else
+      echo "Warning: sudo launcher has not exited yet (PID: $OPENCONNECT_PID)" >&2
+    fi
+
+    if process_is_running "$vpn_process_pid"; then
+      echo "Error: OpenConnect is still running (PID: $vpn_process_pid)" >&2
+    fi
+
     OPENCONNECT_PID=""
   fi
 
@@ -278,6 +345,7 @@ cleanup() {
   rm -f "${LOG_FILE:-}" 2>/dev/null || true
   rm -f "${JS_FILE:-}" 2>/dev/null || true
   rm -f "${VPNC_WRAPPER_FILE:-}" 2>/dev/null || true
+  rm -f "${OPENCONNECT_PID_FILE:-}" 2>/dev/null || true
 
   if (( exit_code == 0 )); then
     echo "Finished."
@@ -479,9 +547,17 @@ EOF_WRAPPER
 
 chmod 700 "$VPNC_WRAPPER_FILE"
 
-# The log file belongs to the current user; only OpenConnect needs sudo.
+OPENCONNECT_PID_FILE="$(mktemp "$TMP_DIR/openconnect_pid.XXXXXX")"
+
 # shellcheck disable=SC2024
-sudo openconnect \
+sudo /bin/sh -c '
+  pid_file=$1
+  shift
+  printf "%s\n" "$$" > "$pid_file" || exit 1
+  exec "$@"
+' openconnect-split-tunnel \
+  "$OPENCONNECT_PID_FILE" \
+  "$(command -v openconnect)" \
   --cookie "$COOKIE" \
   --no-dtls \
   --script "$VPNC_WRAPPER_FILE" \
@@ -677,6 +753,10 @@ if [[ -n "$UNEXPECTED_ROUTES" ]]; then
   printf '%s' "$UNEXPECTED_ROUTES"
   exit 1
 fi
+
+ping -n -i 60 "$VPN_CORPORATE_DNS" >/dev/null 2>&1 &
+VPN_KEEPALIVE_PID=$!
+echo "VPN keepalive started: ping $VPN_CORPORATE_DNS every 60 seconds"
 
 echo
 echo "Routes processed"
